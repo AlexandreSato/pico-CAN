@@ -46,6 +46,13 @@ mcp2515_can CAN(SPI_CS_PIN); // Set CS pin
 #define MAX_DATA_SIZE 8
 #endif
 
+// Transmissão periódica
+uint32_t txId = 0x123;
+byte txData[4] = {0xDE, 0xAD, 0xBE, 0xEF};
+
+unsigned long lastTx = 0;
+const unsigned long txInterval = 100; // 100 ms
+
 void setup() {
     SERIAL_PORT_MONITOR.begin(115200);
     while (!SERIAL_PORT_MONITOR) {}
@@ -128,6 +135,20 @@ void loop() {
         }
         else {
           Serial.println("Comando desconhecido. Use 'BOOT' ou 'RESET'.");
+        }
+    }
+
+    // Transmite DE AD BE EF a cada 100 ms
+    if (millis() - lastTx >= txInterval) {
+        lastTx = millis();
+
+        byte result = CAN.sendMsgBuf(txId, 0, 4, txData);
+
+        if (result == CAN_OK) {
+            SERIAL_PORT_MONITOR.println("TX: 123#DEADBEEF");
+        } else {
+            SERIAL_PORT_MONITOR.print("TX ERROR: ");
+            SERIAL_PORT_MONITOR.println(result);
         }
     }
 
