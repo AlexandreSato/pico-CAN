@@ -11,8 +11,8 @@ from opendbc.car.structs import CarParams
 # CONFIGURACAO
 # =========================================================
 
-TX_BUS = 2
-RX_BUS = 0
+TX_BUS = 0
+RX_BUS = 2
 
 BITRATE = 500
 
@@ -186,8 +186,8 @@ def run_stage(p, stage, rate):
     elapsed = time.monotonic() - start
 
     print(f"Enviados pelo Panda:  {s['sent']}")
-    print(f"Eco local (bus 130):  {s['echo']}")
-    print(f"Recebidos no bus 0:   {s['received']}")
+    print(f"Eco local (bus {TX_BUS + 128}): {s['echo']}")
+    print(f"Recebidos no bus {RX_BUS}:       {s['received']}")
     print(f"Perdidos:             {lost}")
     print(f"Rejeitados:           {s['rejected']}")
     print(f"Duplicados:           {s['duplicate']}")
@@ -204,7 +204,7 @@ def run_stage(p, stage, rate):
         print("\nFALHA: encaminhamento incompleto.")
         return False
 
-    print("\nOK: todos os quadros chegaram ao bus 0.")
+    print(f"\nOK: todos os quadros chegaram ao bus {RX_BUS}.")
     return True
 
 
