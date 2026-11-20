@@ -2064,7 +2064,13 @@ byte mcp2518fd::checkError(uint8_t* err_ptr) {
 // **                          Status has to be read with readRxTxStatus.
 // *********************************************************************************************************/
 byte mcp2518fd::mcp2518fd_readMsgBufID(volatile byte *len, volatile byte *buf) {
-  mcp2518fd_ReceiveMessageGet(APP_RX_FIFO, &rxObj, rxd, MAX_DATA_BYTES);
+    int8_t result = mcp2518fd_ReceiveMessageGet(
+    APP_RX_FIFO, &rxObj, rxd, MAX_DATA_BYTES
+  );
+
+  if (result != 0) {
+    return (byte)result;
+  }
   ext_flg = rxObj.bF.ctrl.IDE;
   can_id = ext_flg? (rxObj.bF.id.EID | ((uint32_t) rxObj.bF.id.SID << 18))
                   :  rxObj.bF.id.SID;
