@@ -71,6 +71,21 @@ uint32_t blocked_2_to_0 = 0;
 uint32_t errors_0_to_2 = 0;
 uint32_t errors_2_to_0 = 0;
 
+uint32_t rx_seen_0 = 0;
+uint32_t rx_seen_2 = 0;
+
+uint32_t read_ok_0 = 0;
+uint32_t read_ok_2 = 0;
+
+uint32_t read_errors_0 = 0;
+uint32_t read_errors_2 = 0;
+
+uint32_t invalid_len_0 = 0;
+uint32_t invalid_len_2 = 0;
+
+uint32_t tx_attempts_0 = 0;
+uint32_t tx_attempts_2 = 0;
+
 // =====================================================
 // TEMPORIZAÇÃO
 // =====================================================
@@ -190,50 +205,69 @@ void forwardFrame(
   bool direction_0_to_2
 ) {
 
-  // checkReceive retorna 2 para FIFO vazia e 3 para não vazia.
+  // 1. Verifica se existe quadro na FIFO RX
   byte rxStatus = src.checkReceive();
 
   if ((rxStatus & 0x01) == 0) {
     return;
   }
 
+  if (direction_0_to_2) {
+    rx_seen_0++;
+  } else {
+    rx_seen_2++;
+  }
+
+  // 2. Lê o quadro
   byte len = 0;
   byte data[64] = {0};
 
   byte readResult = src.readMsgBuf(&len, data);
 
-  if (readResult != CAN_OK || len > 64) {
+  if (readResult != CAN_OK) {
+    if (direction_0_to_2) {
+      read_errors_0++;
+    } else {
+      read_errors_2++;
+    }
+    return;
+  }
+
+  if (direction_0_to_2) {
+    read_ok_0++;
+  } else {
+    read_ok_2++;
+  }
+
+  if (len > 64) {
+    if (direction_0_to_2) {
+      invalid_len_0++;
+    } else {
+      invalid_len_2++;
+    }
     return;
   }
 
   unsigned long id = src.getCanId();
-
   byte ext = src.isExtendedFrame();
   byte rtr = src.isRemoteRequest();
 
-  // ---------------------------------------------------
-  // FILTRO
-  // ---------------------------------------------------
-
+  // 3. Filtro
   if (filterEnabled && id != filterId) {
-
     if (direction_0_to_2) {
       blocked_0_to_2++;
     } else {
       blocked_2_to_0++;
     }
-
-    if (verbose) {
-      Serial.print("[FILTER] Bloqueado ID=0x");
-      Serial.println(id, HEX);
-    }
-
     return;
   }
 
-  // ---------------------------------------------------
-  // ENCAMINHAR SEM ALTERAR ID OU PAYLOAD
-  // ---------------------------------------------------
+  // 4. Tenta transmitir
+  if (direction_0_to_2) {
+    tx_attempts_0++;
+  } else {
+    tx_attempts_2++;
+  }
 
   byte result = dst.trySendMsgBuf(
     id,
@@ -252,24 +286,11 @@ void forwardFrame(
     }
 
     if (verbose) {
-
       Serial.print(direction_0_to_2 ? "[0->2] " : "[2->0] ");
-
       Serial.print("ID=0x");
       Serial.print(id, HEX);
-
       Serial.print(" LEN=");
-      Serial.print(len);
-
-      Serial.print(" DATA=");
-
-      for (byte i = 0; i < len; i++) {
-        if (data[i] < 0x10) Serial.print("0");
-        Serial.print(data[i], HEX);
-        Serial.print(" ");
-      }
-
-      Serial.println();
+      Serial.println(len);
     }
 
   } else {
@@ -282,10 +303,6 @@ void forwardFrame(
 
     Serial.print("[TX ERROR] ");
     Serial.print(direction_0_to_2 ? "0->2" : "2->0");
-
-    Serial.print(" ID=0x");
-    Serial.print(id, HEX);
-
     Serial.print(" RESULT=");
     Serial.println(result);
   }
@@ -348,6 +365,38 @@ void printStatus() {
 
   Serial.print("Erros TX 2->0: ");
   Serial.println(errors_2_to_0);
+
+  Serial.println("--- DIAGNOSTICO RX/TX ---");
+
+  Serial.print("RX encontrados CAN0: ");
+  Serial.println(rx_seen_0);
+
+  Serial.print("RX encontrados CAN2: ");
+  Serial.println(rx_seen_2);
+
+  Serial.print("Leituras OK CAN0: ");
+  Serial.println(read_ok_0);
+
+  Serial.print("Leituras OK CAN2: ");
+  Serial.println(read_ok_2);
+
+  Serial.print("Erros leitura CAN0: ");
+  Serial.println(read_errors_0);
+
+  Serial.print("Erros leitura CAN2: ");
+  Serial.println(read_errors_2);
+
+  Serial.print("Comprimento invalido CAN0: ");
+  Serial.println(invalid_len_0);
+
+  Serial.print("Comprimento invalido CAN2: ");
+  Serial.println(invalid_len_2);
+
+  Serial.print("Tentativas TX 0->2: ");
+  Serial.println(tx_attempts_0);
+
+  Serial.print("Tentativas TX 2->0: ");
+  Serial.println(tx_attempts_2);
 
   Serial.println("============================");
   Serial.println();
@@ -449,6 +498,21 @@ void processCommand(char *cmd) {
 
     errors_0_to_2 = 0;
     errors_2_to_0 = 0;
+
+    rx_seen_0 = 0;
+    rx_seen_2 = 0;
+
+    read_ok_0 = 0;
+    read_ok_2 = 0;
+
+    read_errors_0 = 0;
+    read_errors_2 = 0;
+
+    invalid_len_0 = 0;
+    invalid_len_2 = 0;
+
+    tx_attempts_0 = 0;
+    tx_attempts_2 = 0;
 
     Serial.println("Contadores zerados.");
 
