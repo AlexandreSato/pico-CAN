@@ -22,7 +22,7 @@
 #define CAN2_MISO  12
 #define CAN2_MOSI  11
 
-#define CAN_SPEED  CAN_500KBPS
+#define CAN_SPEED  CAN_500K_2M
 #define CAN_CLOCK  MCP2518FD_20MHz
 
 // =====================================================
@@ -199,11 +199,7 @@ void testSPI1() {
 // ENCAMINHAMENTO
 // =====================================================
 
-void forwardFrame(
-  mcp2518fd &src,
-  mcp2518fd &dst,
-  bool direction_0_to_2
-) {
+void forwardFrame(mcp2518fd &src, mcp2518fd &dst, bool direction_0_to_2) {
 
   // 1. Verifica se existe quadro na FIFO RX
   byte rxStatus = src.checkReceive();
@@ -269,13 +265,7 @@ void forwardFrame(
     tx_attempts_2++;
   }
 
-  byte result = dst.trySendMsgBuf(
-    id,
-    ext,
-    rtr,
-    len,
-    data
-  );
+  byte result = dst.trySendMsgBuf(id, ext, rtr,  CANFD::len2dlc(len), data);
 
   if (result == CAN_OK) {
 
