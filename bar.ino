@@ -5,10 +5,11 @@
 #include "mcp2518fd_can.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
-// =====================================================
-// PINAGEM
-// =====================================================
+ // =====================================================
+ // PINAGEM
+ // =====================================================
 
 // SPI0 -> CAN0 -> Panda bus 0
 #define CAN0_CS    17
@@ -43,20 +44,34 @@ enum OperationMode {
   MODE_GATEWAY
 };
 
-OperationMode operationMode = MODE_STOPPED;
+OperationMode operationMode = MODE_GATEWAY;
 
 // =====================================================
-// FILTRO
+// PROCESSAMENTO 0x147
 // =====================================================
 
-bool filterEnabled = true;
-unsigned long filterId = 0x123;
+// Processamento do torque sempre ativo nos dois sentidos.
+// Torque entre -102 e +102 é limitado a -102 ou +102.
+// Torque zero resulta em +102.
+
+int16_t spoofTorque = 102;
+
+// =====================================================
+// BLOQUEIO DE CAN ID
+// =====================================================
+
+// Independente do processamento 0x147.
+// Aplicado nos dois sentidos.
+// Para configurar diretamente no código, altere blockFilterId.
+
+bool blockFilterEnabled = false;
+unsigned long blockFilterId = 0x147;
 
 // =====================================================
 // LOG
 // =====================================================
 
-bool verbose = true;
+bool verbose = false;
 
 // =====================================================
 // CONTADORES
@@ -64,9 +79,6 @@ bool verbose = true;
 
 uint32_t count_0_to_2 = 0;
 uint32_t count_2_to_0 = 0;
-
-uint32_t blocked_0_to_2 = 0;
-uint32_t blocked_2_to_0 = 0;
 
 uint32_t errors_0_to_2 = 0;
 uint32_t errors_2_to_0 = 0;
@@ -86,6 +98,13 @@ uint32_t invalid_len_2 = 0;
 uint32_t tx_attempts_0 = 0;
 uint32_t tx_attempts_2 = 0;
 
+// Contadores específicos do 0x147
+uint32_t modified_147 = 0;
+uint32_t unprocessed_147 = 0;
+
+// Contador do bloqueio configurável
+uint32_t blocked_frames = 0;
+
 // =====================================================
 // TEMPORIZAÇÃO
 // =====================================================
@@ -100,6 +119,100 @@ uint32_t testSequence = 0;
 char commandBuffer[64];
 byte commandLength = 0;
 uint32_t lastSerialChar = 0;
+
+// =====================================================
+// CRC RX_STEER_RELATED
+// =====================================================
+
+uint8_t checksum(const uint8_t *data, uint8_t len, uint8_t xorOutput) {
+
+  uint8_t crc = 0;
+  for (uint8_t i = 0; i < len; i++) {
+    crc ^= data[i];
+    for (uint8_t bit = 0; bit < 8; bit++) {
+      if (crc & 0x80) {
+        crc = (crc << 1) ^ 0x1D;
+      } else {
+        crc <<= 1;
+      }
+    }
+  }
+  return crc ^ xorOutput;
+}
+
+// =====================================================
+// PROCESSAMENTO DO PACOTE 0x147
+// =====================================================
+
+// Altera somente a cópia que será encaminhada.
+// Não altera os outros bytes.
+// Retorna true somente quando o torque foi modificado.
+
+bool process0x147(uint8_t *data, uint8_t len) {
+
+  if (len < 16 || spoofTorque <= 0) {
+    return false;
+  }
+
+  if (verbose) {
+      Serial.print("ANTES:  ");
+      for (int i = 0; i < len; i++) {
+        Serial.printf("%02X ", data[i]);
+      }
+      Serial.println();
+  }
+
+  uint16_t rawTorque =
+    ((uint16_t)(data[9] & 0x7F) << 4) |
+    ((data[10] >> 4) & 0x0F);
+
+  int16_t originalTorque =
+    (rawTorque & 0x400) ?
+    (int16_t)(rawTorque - 0x800) :
+    (int16_t)rawTorque;
+
+  int16_t adjustedTorque = originalTorque;
+
+  if (originalTorque >= 0 && originalTorque < spoofTorque) {
+    adjustedTorque = spoofTorque;
+  } else if (originalTorque < 0 && originalTorque > -spoofTorque) {
+    adjustedTorque = -spoofTorque;
+  }
+
+  if (adjustedTorque == originalTorque) {
+    return false;
+  }
+
+  // Converte para complemento de dois de 11 bits.
+  uint16_t torque = (uint16_t)adjustedTorque & 0x07FF;
+
+  // Byte 9:
+  // Preserva bit 7.
+  // Substitui bits 6:0.
+  data[9] = (data[9] & 0x80) |
+            ((torque >> 4) & 0x7F);
+
+  // Byte 10:
+  // Preserva nibble inferior.
+  // Substitui nibble superior.
+  data[10] = (data[10] & 0x0F) |
+             ((torque & 0x0F) << 4);
+
+  // Byte 8:
+  // CRC sobre bytes 9 a 15.
+  data[8] = checksum(&data[9], 7, 0x61);
+   
+  if (verbose) {
+      Serial.print("DEPOIS: ");
+      for (int i = 0; i < len; i++) {
+        Serial.printf("%02X ", data[i]);
+      }
+      Serial.println();
+  }
+
+  modified_147++;
+  return true;
+}
 
 // =====================================================
 // INICIALIZAÇÃO DOS CAN
@@ -214,7 +327,7 @@ void forwardFrame(mcp2518fd &src, mcp2518fd &dst, bool direction_0_to_2) {
     rx_seen_2++;
   }
 
-  // 2. Lê o quadro
+  // 2. Lê quadro
   byte len = 0;
   byte data[64] = {0};
 
@@ -244,28 +357,71 @@ void forwardFrame(mcp2518fd &src, mcp2518fd &dst, bool direction_0_to_2) {
     return;
   }
 
+  // 3. Recupera informações originais
   unsigned long id = src.getCanId();
   byte ext = src.isExtendedFrame();
   byte rtr = src.isRemoteRequest();
 
-  // 3. Filtro
-  if (filterEnabled && id != filterId) {
-    if (direction_0_to_2) {
-      blocked_0_to_2++;
-    } else {
-      blocked_2_to_0++;
+  // =================================================
+  // 4. BLOQUEIO CONFIGURÁVEL DE CAN ID
+  // =================================================
+
+  if (blockFilterEnabled && id == blockFilterId) {
+    blocked_frames++;
+
+    if (verbose) {
+      Serial.print("[BLOCK] ID=0x");
+      Serial.println(id, HEX);
     }
+
     return;
   }
 
-  // 4. Tenta transmitir
+  // =================================================
+  // 5. TRATAMENTO ESPECIAL DO 0x147
+  // =================================================
+
+  if (id == 0x147) {
+
+    if (rtr || len < 16) {
+      unprocessed_147++;
+
+      if (verbose) {
+        Serial.print("[0x147 UNCHANGED] LEN=");
+        Serial.print(len);
+        Serial.print(" RTR=");
+        Serial.println(rtr);
+      }
+
+    } else if (process0x147(data, len)) {
+
+      if (verbose) {
+        Serial.print("[MODIFIED 0x147] Limite torque=");
+        Serial.print(spoofTorque);
+
+        Serial.print(" CRC=0x");
+        Serial.println(data[8], HEX);
+      }
+    }
+  }
+
+  // =================================================
+  // 6. TRANSMISSÃO NORMAL
+  // =================================================
+
   if (direction_0_to_2) {
     tx_attempts_0++;
   } else {
     tx_attempts_2++;
   }
 
-  byte result = dst.trySendMsgBuf(id, ext, rtr,  CANFD::len2dlc(len), data);
+  byte result = dst.trySendMsgBuf(
+    id,
+    ext,
+    rtr,
+    CANFD::len2dlc(len),
+    data
+  );
 
   if (result == CAN_OK) {
 
@@ -276,7 +432,10 @@ void forwardFrame(mcp2518fd &src, mcp2518fd &dst, bool direction_0_to_2) {
     }
 
     if (verbose) {
-      Serial.print(direction_0_to_2 ? "[0->2] " : "[2->0] ");
+
+      Serial.print(direction_0_to_2 ?
+                   "[0->2] " : "[2->0] ");
+
       Serial.print("ID=0x");
       Serial.print(id, HEX);
       Serial.print(" LEN=");
@@ -292,7 +451,10 @@ void forwardFrame(mcp2518fd &src, mcp2518fd &dst, bool direction_0_to_2) {
     }
 
     Serial.print("[TX ERROR] ");
-    Serial.print(direction_0_to_2 ? "0->2" : "2->0");
+
+    Serial.print(direction_0_to_2 ?
+                 "0->2" : "2->0");
+
     Serial.print(" RESULT=");
     Serial.println(result);
   }
@@ -327,11 +489,16 @@ void printStatus() {
       break;
   }
 
-  Serial.print("Filtro: ");
-  Serial.println(filterEnabled ? "ON" : "OFF");
+  Serial.println("Processamento 0x147: ON");
 
-  Serial.print("ID permitido: 0x");
-  Serial.println(filterId, HEX);
+  Serial.print("Limite minimo torque: ");
+  Serial.println(spoofTorque);
+
+  Serial.print("Bloqueio CAN ID: ");
+  Serial.println(blockFilterEnabled ? "ON" : "OFF");
+
+  Serial.print("ID bloqueado: 0x");
+  Serial.println(blockFilterId, HEX);
 
   Serial.print("Verbose: ");
   Serial.println(verbose ? "ON" : "OFF");
@@ -344,17 +511,24 @@ void printStatus() {
   Serial.print("SPI1 -> SPI0: ");
   Serial.println(count_2_to_0);
 
-  Serial.print("Bloqueados 0->2: ");
-  Serial.println(blocked_0_to_2);
-
-  Serial.print("Bloqueados 2->0: ");
-  Serial.println(blocked_2_to_0);
-
   Serial.print("Erros TX 0->2: ");
   Serial.println(errors_0_to_2);
 
   Serial.print("Erros TX 2->0: ");
   Serial.println(errors_2_to_0);
+
+  Serial.println("--- PROCESSAMENTO 0x147 ---");
+
+  Serial.print("Pacotes modificados: ");
+  Serial.println(modified_147);
+
+  Serial.print("Pacotes encaminhados sem processamento: ");
+  Serial.println(unprocessed_147);
+
+  Serial.println("--- BLOQUEIO CAN ID ---");
+
+  Serial.print("Pacotes bloqueados: ");
+  Serial.println(blocked_frames);
 
   Serial.println("--- DIAGNOSTICO RX/TX ---");
 
@@ -400,18 +574,18 @@ void printHelp() {
 
   Serial.println();
   Serial.println("========== COMANDOS ==========");
-  Serial.println("teste spi0    - Testa transmissao SPI0");
-  Serial.println("teste spi1    - Testa transmissao SPI1");
-  Serial.println("gateway       - Inicia gateway");
-  Serial.println("parar         - Para tudo");
-  Serial.println("filtro on     - Ativa filtro");
-  Serial.println("filtro off    - Desativa filtro");
-  Serial.println("filtro id 123 - Define ID permitido");
-  Serial.println("verbose on    - Ativa logs");
-  Serial.println("verbose off   - Desativa logs");
-  Serial.println("status        - Mostra status");
-  Serial.println("zerar         - Zera contadores");
-  Serial.println("help          - Ajuda");
+  Serial.println("teste spi0       - Testa transmissao SPI0");
+  Serial.println("teste spi1       - Testa transmissao SPI1");
+  Serial.println("gateway          - Inicia gateway");
+  Serial.println("parar            - Para tudo");
+  Serial.println("bloqueio on      - Ativa bloqueio do CAN ID");
+  Serial.println("bloqueio off     - Desativa bloqueio do CAN ID");
+  Serial.println("bloqueio id 0x147 - Define ID a bloquear (HEX)");
+  Serial.println("verbose on       - Ativa logs");
+  Serial.println("verbose off      - Desativa logs");
+  Serial.println("status           - Mostra status");
+  Serial.println("zerar            - Zera contadores");
+  Serial.println("help             - Ajuda");
   Serial.println("==============================");
   Serial.println();
 }
@@ -426,65 +600,68 @@ void processCommand(char *cmd) {
   }
 
   if (strcmp(cmd, "teste spi0") == 0) {
-
     operationMode = MODE_TEST_SPI0;
     lastTestSend = 0;
     Serial.println("Modo TESTE SPI0 ativado.");
 
   } else if (strcmp(cmd, "teste spi1") == 0) {
-
     operationMode = MODE_TEST_SPI1;
     lastTestSend = 0;
     Serial.println("Modo TESTE SPI1 ativado.");
 
   } else if (strcmp(cmd, "gateway") == 0) {
-
     operationMode = MODE_GATEWAY;
     Serial.println("Gateway bidirecional ATIVO.");
 
   } else if (strcmp(cmd, "parar") == 0) {
-
     operationMode = MODE_STOPPED;
     Serial.println("Tudo PARADO.");
 
-  } else if (strcmp(cmd, "filtro on") == 0) {
+  } else if (strcmp(cmd, "bloqueio on") == 0) {
+    blockFilterEnabled = true;
+    Serial.print("Bloqueio ATIVADO para ID 0x");
+    Serial.println(blockFilterId, HEX);
 
-    filterEnabled = true;
-    Serial.println("Filtro ATIVADO.");
+  } else if (strcmp(cmd, "bloqueio off") == 0) {
+    blockFilterEnabled = false;
+    Serial.println("Bloqueio DESATIVADO.");
 
-  } else if (strcmp(cmd, "filtro off") == 0) {
+  } else if (strncmp(cmd, "bloqueio id ", 12) == 0) {
 
-    filterEnabled = false;
-    Serial.println("Filtro DESATIVADO.");
+    char *idText = cmd + 12;
+    char *endPtr;
 
-  } else if (strncmp(cmd, "filtro id ", 10) == 0) {
+    unsigned long requestedId = strtoul(idText, &endPtr, 16);
 
-    filterId = strtoul(cmd + 10, NULL, 16);
+    if (strncmp(idText, "0x", 2) == 0 &&
+        endPtr != idText + 2 &&
+        *endPtr == '\0' &&
+        requestedId <= 0x1FFFFFFF) {
 
-    Serial.print("ID do filtro: 0x");
-    Serial.println(filterId, HEX);
+      blockFilterId = requestedId;
+
+      Serial.print("ID de bloqueio definido: 0x");
+      Serial.println(blockFilterId, HEX);
+
+    } else {
+      Serial.println("ID invalido. Use hexadecimal: bloqueio id 0x147");
+    }
 
   } else if (strcmp(cmd, "verbose on") == 0) {
-
     verbose = true;
     Serial.println("Verbose ON.");
 
   } else if (strcmp(cmd, "verbose off") == 0) {
-
     verbose = false;
     Serial.println("Verbose OFF.");
 
   } else if (strcmp(cmd, "status") == 0) {
-
     printStatus();
 
   } else if (strcmp(cmd, "zerar") == 0) {
 
     count_0_to_2 = 0;
     count_2_to_0 = 0;
-
-    blocked_0_to_2 = 0;
-    blocked_2_to_0 = 0;
 
     errors_0_to_2 = 0;
     errors_2_to_0 = 0;
@@ -504,14 +681,16 @@ void processCommand(char *cmd) {
     tx_attempts_0 = 0;
     tx_attempts_2 = 0;
 
+    modified_147 = 0;
+    unprocessed_147 = 0;
+    blocked_frames = 0;
+
     Serial.println("Contadores zerados.");
 
   } else if (strcmp(cmd, "help") == 0) {
-
     printHelp();
 
   } else if (cmd[0] != '\0') {
-
     Serial.print("Comando desconhecido: ");
     Serial.println(cmd);
   }
@@ -547,8 +726,8 @@ void readSerialCommands() {
     }
   }
 
-  // Também aceita comandos sem final de linha:
-  // processa após 100 ms sem receber caracteres.
+  // Aceita comandos sem final de linha
+
   if (commandLength > 0 &&
       millis() - lastSerialChar >= 100) {
 
@@ -603,12 +782,10 @@ void loop() {
   // ---------------------------------------------------
 
   if (operationMode == MODE_TEST_SPI0) {
-
     if (now - lastTestSend >= 1000) {
       lastTestSend = now;
       testSPI0();
     }
-
     return;
   }
 
@@ -617,7 +794,6 @@ void loop() {
   // ---------------------------------------------------
 
   if (operationMode == MODE_TEST_SPI1) {
-
     if (now - lastTestSend >= 1000) {
       lastTestSend = now;
       testSPI1();
@@ -631,7 +807,6 @@ void loop() {
   // ---------------------------------------------------
 
   if (operationMode == MODE_GATEWAY) {
-
     forwardFrame(CAN0, CAN2, true);
     forwardFrame(CAN2, CAN0, false);
   }
