@@ -15,14 +15,25 @@
 // For Arduino MCP2515 Hat:
 // SPI_CS Pin: D9
 
-const int SPI_CS_PIN_SEND = 9;
-const int SPI_CS_PIN_RECEIVE = 2;
+const int SPI_CS_PIN_SEND = 17;
+const int SPI_CS_PIN_RECEIVE = 13;
 
 mcp2518fd CAN_SEND(SPI_CS_PIN_SEND);
 mcp2518fd CAN_RECEIVE(SPI_CS_PIN_RECEIVE);
 
 // CANFD could carry data up to 64 bytes
 #define MAX_DATA_SIZE 64
+
+#define CAN0_CS    17
+#define CAN0_SCK   18
+#define CAN0_MISO  16
+#define CAN0_MOSI  19
+
+// SPI1 -> CAN2 -> Panda bus 2
+#define CAN2_CS    13
+#define CAN2_SCK   10
+#define CAN2_MISO  12
+#define CAN2_MOSI  11
 
 void setup() {
     SERIAL_PORT_MONITOR.begin(115200);
@@ -35,8 +46,15 @@ void setup() {
      */
     CAN_SEND.setMode(CAN_NORMAL_MODE);
     CAN_RECEIVE.setMode(CAN_NORMAL_MODE);
+
+    SPI1.setSCK(CAN2_SCK);
+    SPI1.setRX(CAN2_MISO);
+    SPI1.setTX(CAN2_MOSI);
+    SPI1.begin();
+
+    CAN_RECEIVE.setSPI(&SPI1);
     
-    if (CAN_SEND.begin(CAN_500K_1M) != 0 || CAN_RECEIVE.begin(CAN_500K_1M) != 0) {
+    if (CAN_SEND.begin(CAN_500K_2M, MCP2518FD_20MHz) != 0 || CAN_RECEIVE.begin(CAN_500K_2M, MCP2518FD_20MHz, false) != 0) {
         SERIAL_PORT_MONITOR.println("CAN-BUS initiliased error!");
         while (1);
     }
@@ -66,12 +84,28 @@ void loop() {
     }
 
     CAN_SEND.sendMsgBuf(0x00, 0, CANFD::len2dlc(MAX_DATA_SIZE), stmp);
+
+    // Imprime o conteúdo do stmp no Monitor Serial
+    Serial.println("Dados enviados (stmp) em HEX:");
+    for(int i = 0; i < MAX_DATA_SIZE; i++)
+    {
+        if (stmp[i] < 0x10) Serial.print("0"); // Adiciona zero à esquerda para alinhar
+        Serial.print(stmp[i], HEX);
+        Serial.print(" ");
+        
+        // Quebra a linha a cada 16 bytes para facilitar a leitura
+        if ((i + 1) % 16 == 0) Serial.println(); 
+    }
+    Serial.println();
+
     delay(100);                       // send data per 100ms
     SERIAL_PORT_MONITOR.println("CAN BUS sendMsgBuf ok!");
 
     // ---------------------
     if (CAN_MSGAVAIL == CAN_RECEIVE.checkReceive()) {
         // read data,  len: data length, buf: data buf
+        SERIAL_PORT_MONITOR.println();
+        SERIAL_PORT_MONITOR.println();
         SERIAL_PORT_MONITOR.println("checkReceive");
         CAN_RECEIVE.readMsgBuf(&len, buf);
         // print the data
@@ -80,6 +114,19 @@ void loop() {
             SERIAL_PORT_MONITOR.print(' ');
         }
         SERIAL_PORT_MONITOR.println();
+
+        // Imprime o conteúdo do buf no Monitor Serial
+        Serial.println("Dados recebidos (buf) em HEX:");
+        for(int i = 0; i < len; i++)
+        {
+            if (buf[i] < 0x10) Serial.print("0"); // Adiciona zero à esquerda para alinhar
+            Serial.print(buf[i], HEX);
+            Serial.print(" ");
+            
+            // Quebra a linha a cada 16 bytes para facilitar a leitura
+            if ((i + 1) % 16 == 0) Serial.println(); 
+        }
+        Serial.println();
     }
     SERIAL_PORT_MONITOR.println("---LOOP END---");
 }
