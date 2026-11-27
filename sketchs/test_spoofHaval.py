@@ -10,7 +10,7 @@ BUS_TX = 2                      # bus do panda ligado ao seu gateway
 BUS_RX = 0
 ADDR = 0x147                   # RX_STEER_RELATED
 SPOOF_TORQUE = 102             # mesmo valor do seu firmware
-N_FRAMES = 200
+N_FRAMES = 5
 
 
 def checksum(data, xor_output):
@@ -49,6 +49,7 @@ def make_rx_steer(packer, torque, counter):
 def main():
   p = Panda()
   p.set_safety_mode(CarParams.SafetyModel.allOutput)
+  p.set_can_data_speed_kbps(BUS_TX, 2000) 
 
   packer = CANPacker(DBC_NAME)
   parser = CANParser(DBC_NAME, [(ADDR, 0)], BUS_RX)
@@ -65,7 +66,7 @@ def main():
     if i < 4:
       print(f"TX torque={torque} CRC=0x{dat[8]:02X} DATA={dat.hex()}")
 
-    p.can_send(addr, dat, bus)
+    p.can_send(addr, dat, bus, fd=True)
     time.sleep(0.02)  # ~100 Hz
 
     # lê de volta o que o gateway retransmitir)
